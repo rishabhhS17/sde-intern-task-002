@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { homeExists } from '../db'
 import { nameSchema, parseJsonBody } from '../validation'
 
 export const homeRoutes = new Hono<{ Bindings: Env }>()
@@ -48,4 +49,24 @@ homeRoutes.post('/homes/:homeId/members', async (c) => {
   if (inserted.meta.changes === 0) return c.json({ error: 'Home not found' }, 404)
 
   return c.json(member, 201)
+})
+
+homeRoutes.get('/homes/:homeId/balances', async (c) => {
+  const homeId = c.req.param('homeId')
+  if (!(await homeExists(c.env.DB, homeId))) return c.json({ error: 'Home not found' }, 404)
+
+  const { results: balances } = await c.env.DB.prepare(
+    `SELECT members.id AS memberId,
+            members.name AS name,
+            COALESCE(SUM(CASE WHEN shares.paid_at IS NULL THEN shares.amount_cents ELSE 0 END), 0)
+              AS outstandingCents
+     FROM members
+     LEFT JOIN shares ON shares.member_id = members.id
+     WHERE members.home_id = ?
+     GROUP BY members.id
+     ORDER BY members.position`,
+  )
+    .bind(homeId)
+    .all<{ memberId: string; name: string; outstandingCents: number }>()
+  return c.json({ balances })
 })
