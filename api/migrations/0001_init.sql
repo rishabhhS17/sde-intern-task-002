@@ -30,3 +30,20 @@ CREATE TABLE bills (
 );
 
 CREATE INDEX bills_home_id_index ON bills (home_id);
+
+CREATE TABLE shares (
+  id TEXT PRIMARY KEY,
+  bill_id TEXT NOT NULL,
+  member_id TEXT NOT NULL,
+  amount_cents INTEGER NOT NULL,
+  paid_at TEXT,
+  idempotency_key TEXT,
+  CONSTRAINT shares_bill_fk FOREIGN KEY (bill_id) REFERENCES bills (id),
+  CONSTRAINT shares_member_fk FOREIGN KEY (member_id) REFERENCES members (id),
+  CONSTRAINT shares_one_per_member_per_bill UNIQUE (bill_id, member_id),
+  CONSTRAINT shares_amount_non_negative_integer CHECK (typeof(amount_cents) = 'integer' AND amount_cents >= 0),
+  -- A share is paid exactly when it carries the key of the request that paid it.
+  CONSTRAINT shares_paid_has_key CHECK ((paid_at IS NULL) = (idempotency_key IS NULL))
+);
+
+CREATE INDEX shares_member_id_index ON shares (member_id);
