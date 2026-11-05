@@ -155,3 +155,47 @@ You must understand every line you submit. We check this with your video and in 
 5. Paste the repository link and the video link in the application form.
 
 We will run `pnpm install && pnpm check && pnpm typecheck && pnpm test` on your repository.
+
+## Decisions
+
+**1. Paying a share is one conditional `UPDATE`, not read-then-write.**
+`UPDATE shares SET paid_at = ?, idempotency_key = ? WHERE id = ? AND bill_id = ? AND paid_at IS NULL`.
+SQLite (and so D1) runs writes one at a time, so if two requests race, exactly one changes the row.
+The other changes nothing, re-reads the share, and gets `200` if it sent the same key (a retry) or
+`409` if it sent a different key. Reading first and then writing would leave a gap where both
+requests see "unpaid" and both pay. The key is stored on the share itself, and a `CHECK` makes
+sure a share is paid exactly when it has a key. Trade-off: keys are scoped to one share, so the
+same key on two different shares pays both. The README only asks for "same key, same share", and
+it saves a separate idempotency table.
+
+**2. Member order is an explicit `position` column, not a timestamp.**
+The extra cents go to members in the order they joined, so that order has to be exact. Two members
+added in the same millisecond would tie on `created_at`, and `rowid` order is not a guarantee. A
+new member gets `MAX(position) + 1` in the same `INSERT ... SELECT` that checks the home exists,
+and `UNIQUE (home_id, position)` makes a duplicate position impossible even under races.
+
+**3. A bill and its shares are written in one `db.batch()`.**
+D1 runs a batch as a single transaction, so a bill can never exist without its shares, or with
+only some of them. The split itself (`api/src/split.ts`) is plain integer maths:
+`floor(total / n)` each, and the first `total % n` members get one extra cent, so the shares
+always add up to the total. Trade-off: members are read just before the batch, so a member added
+at that exact moment is simply not part of this bill. That matches the rule that a bill is split
+between the members the home has when the bill is created.
+
+**Other choices**
+
+- Named constraints in `api/migrations/0001_init.sql`: foreign keys on every link, `CHECK` that
+  amounts are whole positive cents (`typeof(...) = 'integer'`), `UNIQUE (bill_id, member_id)`
+  (one share per member per bill), `UNIQUE (home_id, position)`, the paid-has-key `CHECK`, and
+  no blank names or titles.
+- Validation with Zod. `z.int()` rejects `10.5`, `"1000"`, `null` and anything above
+  `Number.MAX_SAFE_INTEGER`. A body that is not JSON is a `400`, and wrong fields are a `422`.
+  Unknown routes and crashes also answer with `{ "error": "..." }`.
+- Two extra read endpoints for the page: `GET /api/homes/:homeId` (home and members) and
+  `GET /api/homes/:homeId/bills` (bills with shares).
+- The web page uses TanStack Query. Payments are not optimistic: a share shows as paid only after
+  the server says so. Each request times out after 10 seconds. A failed payment keeps its
+  `Idempotency-Key`, so "Try again" after a timeout cannot pay twice even if the first request
+  did reach the server.
+- Extra tests in `api/test/edge-cases.test.ts` cover concurrent payments, retries, uneven splits
+  and bad input. The visible tests are unchanged.
